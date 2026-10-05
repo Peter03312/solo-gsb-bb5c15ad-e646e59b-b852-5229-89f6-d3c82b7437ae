@@ -38,7 +38,13 @@
    - 同一细胞的孔洞之间**不得接触或重叠**；
    - 顶点坐标统一**保留三位小数**落盘，全部几何校验以**取整后实际写入的坐标**为准：
      取整使相邻顶点重合、边自交、孔洞贴边/互触等同样被拒绝（见功能 20）；
-   - 任意一个对象不合法时，服务端会指出具体细胞/孔洞编号与原因，**整批轮廓保存不生效**。
+   - 任意一个对象不合法时，服务端会指出具体细胞/孔洞编号与原因，**整批轮廓保存不生效**；
+   - **细胞 id 身份唯一**：同一批细胞内 `id` 必须互不相同。历史版本曾允许两个不同细胞
+     使用同一 id，导致报告比较配对与编辑页按 id 定位只命中**一个**细胞，其余同 id 细胞
+     被静默掩盖。现已修复：保存前原子校验本批 id 唯一，冲突时返回 **HTTP 400**
+     （`code: "CELL_ID_CONFLICT"`，错误信息与 `conflicts` 列出冲突 id 及各自的
+     **1 基位置**），**整批拒绝、不写入、不推进草稿版本、不追加修订**；
+     缺失/空串/非字符串 id 仍按现有规则自动生成唯一标识，合法批次行为不变。
 4. **测量结果**：
    - 净面积 =（外轮廓面积 − 全部孔洞面积）× (μm/px)²，单位 **μm²**；
    - 总周长 =（外轮廓周长 + 全部孔洞周长）× μm/px，单位 **μm**；
@@ -633,7 +639,7 @@ npm start
 │   ├── coverage-diff.js # 同切片两报告 · 单视野覆盖变化四类划分（平面排列，只读）
 │   ├── field-grid.js  # 报告单视野网格密度分析：外接矩形等分、格子∩净区域有效面积、质心归格（只读）
 │   ├── field-zones.js # 报告单视野最近质心责任区：Voronoi 半平面求交 × 视野净区域平面排列、面积/占比/实际分区（只读）
-│   ├── field-identity.js # 视野 id 身份歧义：保存前批次唯一性校验、重复 id 冲突定位、按 id/名称分析的拒绝判定（不改写历史数据）
+│   ├── field-identity.js # 细胞/视野 id 身份歧义：保存前批次唯一性校验、重复 id 冲突定位、按 id/名称分析的拒绝判定（不改写历史数据）
 │   ├── render.js      # sharp + SVG 渲染标注 PNG
 │   └── exporter.js    # CSV（测量/汇总/视野统计/比较）与 ZIP 导出（按选中顺序逐份生成、流式写入并释放）
 ├── public/            # 前端（原生 JS，无需构建）
@@ -660,6 +666,7 @@ npm start
 ├── test-field-zones.js # 最近质心责任区纯逻辑自测（npm test）
 ├── test-field-zones-api.js # 最近质心责任区端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-field-identity-api.js # 视野 id 身份歧义修复端到端 HTTP 自测（npm test，临时目录起服务）
+├── test-cell-id-conflict-api.js # 细胞轮廓整批保存 id 唯一性修复端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-save-rounding-api.js # 轮廓/视野保存按写入坐标（三位小数）校验端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-export-zip-api.js # 批量 ZIP 导出流式化端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-xss-dom.js    # 用户文本文面展示（存储型 XSS 修复）jsdom 页端自测（npm test）
@@ -1836,7 +1843,7 @@ await fieldZones(process.env.RID, 'fieldF');
 | `GET /api/images/:id` | 草稿详情（含 `cells`、`fields`、实时 `fieldStats`） |
 | `GET /api/images/:id/file` | 原始图片 |
 | `PUT /api/images/:id/calibration` | 定标/重定标（带 `version`，过期 409）；视野统计随新比例重算 |
-| `PUT /api/images/:id/contours` | 整批保存细胞轮廓（带 `version`；非法 400 整批不生效；过期 409；几何校验以三位小数取整后实际写入的坐标为准） |
+| `PUT /api/images/:id/contours` | 整批保存细胞轮廓（带 `version`；非法 400 整批不生效；过期 409；几何校验以三位小数取整后实际写入的坐标为准；本批细胞 id 重复 400 `CELL_ID_CONFLICT` 整批不生效） |
 | **`PUT /api/images/:id/fields`** | **整批保存取样视野（带 `version`；非法 400 整批不生效；过期 409；几何校验以三位小数取整后实际写入的坐标为准）** |
 | **`POST /api/images/:id/field-merge`** | **多视野合并统计（只读，按草稿当前数据实时计算；不足两个/重复/不存在 400）** |
 | **`POST /api/images/:id/field-coverage`** | **单视野细胞覆盖核对（只读，几何交集；按草稿当前轮廓/视野/标尺实时计算；视野标识为空/不存在 400，未定标仍给像素面积与覆盖率）** |

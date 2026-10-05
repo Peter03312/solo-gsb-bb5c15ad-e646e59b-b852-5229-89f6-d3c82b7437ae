@@ -19,7 +19,7 @@ const revisionsSvc = require('./revisions');
 const coverageDiffSvc = require('./coverage-diff');
 const fieldGridSvc = require('./field-grid');
 const fieldZonesSvc = require('./field-zones');
-const fieldIdentity = require('./field-identity');
+const identity = require('./field-identity');
 const { renderAnnotatedPng } = require('./render');
 const { buildReportCsv, buildCombinedCsv, buildComparisonCsv, buildFieldStatsCsv, streamZip } = require('./exporter');
 
@@ -62,7 +62,7 @@ function hydrateImage(row) {
     fields,
     fieldStats: fieldsSvc.buildFieldStats(fields, cells, calib ? calib.scale : null),
     // 既有重复 id 数据不静默迁移：显式标出冲突 id 与 1 基位置，供编辑页标明并引导修正
-    fieldIdConflicts: fieldIdentity.findFieldIdConflicts(fields),
+    fieldIdConflicts: identity.findFieldIdConflicts(fields),
     published: !!row.published,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -86,7 +86,7 @@ function hydrateReport(row) {
     fields,
     fieldStats: fieldsSvc.buildFieldStats(fields, cells, calib ? calib.scale : null),
     // 旧报告若发布于重复 id 防护上线前，这里如实标出冲突；报告本身冻结、只读、不被改写
-    fieldIdConflicts: fieldIdentity.findFieldIdConflicts(fields),
+    fieldIdConflicts: identity.findFieldIdConflicts(fields),
     correctsReportId: row.corrects_report_id || null, // 更正链：前一份报告（普通发布为 null）
     correctionReason: row.correction_reason || null,   // 本次更正原因（普通发布为 null）
     createdAt: row.created_at
@@ -300,6 +300,20 @@ app.put('/api/images/:id/contours', (req, res) => {
     return badRequest(res, e.message);
   }
 
+  // 身份唯一性：本批细胞 id 必须唯一。重复 id 会让报告比较配对与编辑页按 id
+  // 定位只命中一个细胞（其余同 id 细胞被静默掩盖），因此整批拒绝、指明冲突 id
+  // 与各自的 1 基位置；不写入、不推进版本、不留修订。
+  const conflicts = identity.findCellIdConflicts(next);
+  if (conflicts.length) {
+    return res.status(400).json({
+      error: `细胞 id 在本批中不唯一：${identity.describeConflicts(conflicts, '细胞')}；` +
+        '同一细胞 id 必须只对应一个细胞，整批轮廓保存已被拒绝（没有任何内容写入）。' +
+        '请为冲突细胞分配不同 id 后按当前草稿版本重新提交。',
+      code: 'CELL_ID_CONFLICT',
+      conflicts
+    });
+  }
+
   next = recompute(next, img.calib);
 
   const updated = commitDraft(img, { cells: next }, 'contours',
@@ -449,10 +463,10 @@ app.put('/api/images/:id/fields', (req, res) => {
   // 身份唯一性：本批视野 id 必须唯一。重复 id 会让合并统计（取后一个）与覆盖核对/
   // 网格密度/最近质心责任区（取前一个）对同一标识给出互相矛盾的结果，因此整批拒绝、
   // 指明冲突 id 与各自的 1 基位置；不写入、不推进版本、不留修订。
-  const conflicts = fieldIdentity.findFieldIdConflicts(next);
+  const conflicts = identity.findFieldIdConflicts(next);
   if (conflicts.length) {
     return res.status(400).json({
-      error: `视野 id 在本批中不唯一：${fieldIdentity.describeConflicts(conflicts)}；` +
+      error: `视野 id 在本批中不唯一：${identity.describeConflicts(conflicts)}；` +
         '同一视野 id 必须只对应一个视野，整批视野保存已被拒绝（没有任何内容写入）。' +
         '请为冲突视野分配不同 id 后按当前草稿版本重新提交。',
       code: 'FIELD_ID_CONFLICT',
@@ -545,7 +559,7 @@ app.get('/api/images/:id/revisions/:revId', (req, res) => {
   // 按该修订自己的标尺重算测量与视野统计：预览即为恢复后所见的一致结果
   rev.fieldStats = fieldsSvc.buildFieldStats(rev.fields, rev.cells, rev.calib ? rev.calib.scale : null);
   // 历史修订只追加不修改：含重复 id 的旧修订如实标出冲突，预览只读、不被改写
-  rev.fieldIdConflicts = fieldIdentity.findFieldIdConflicts(rev.fields);
+  rev.fieldIdConflicts = identity.findFieldIdConflicts(rev.fields);
   rev.isCurrent = img.version === rev.draftVersion;
   res.json(rev);
 });
