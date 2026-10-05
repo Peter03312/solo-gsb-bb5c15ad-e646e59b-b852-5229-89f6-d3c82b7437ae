@@ -300,6 +300,21 @@ app.put('/api/images/:id/contours', (req, res) => {
     return badRequest(res, e.message);
   }
 
+  // 身份唯一性：本批细胞 id 必须唯一。重复 id 会让报告对比的细胞索引（按 id 建 Map）
+  // 与编辑页按 id 选中/定位只保留同 id 细胞中的一个，因此整批拒绝、指明冲突 id 与
+  // 各自的 1 基位置；不写入、不推进版本、不留修订。缺失 id 已在上面补生成 UUID，
+  // 不会进入冲突统计。
+  const conflicts = fieldIdentity.findCellIdConflicts(next);
+  if (conflicts.length) {
+    return res.status(400).json({
+      error: `细胞 id 在本批中不唯一：${fieldIdentity.describeCellConflicts(conflicts)}；` +
+        '同一细胞 id 必须只对应一个细胞，整批轮廓保存已被拒绝（没有任何内容写入）。' +
+        '请为冲突细胞分配不同 id 后按当前草稿版本重新提交。',
+      code: 'CELL_ID_CONFLICT',
+      conflicts
+    });
+  }
+
   next = recompute(next, img.calib);
 
   const updated = commitDraft(img, { cells: next }, 'contours',

@@ -38,7 +38,11 @@
    - 同一细胞的孔洞之间**不得接触或重叠**；
    - 顶点坐标统一**保留三位小数**落盘，全部几何校验以**取整后实际写入的坐标**为准：
      取整使相邻顶点重合、边自交、孔洞贴边/互触等同样被拒绝（见功能 20）；
-   - 任意一个对象不合法时，服务端会指出具体细胞/孔洞编号与原因，**整批轮廓保存不生效**。
+   - 任意一个对象不合法时，服务端会指出具体细胞/孔洞编号与原因，**整批轮廓保存不生效**；
+   - **细胞 id 身份唯一**：同一批细胞内显式提供的 `id` 必须互不相同，冲突时返回
+     **HTTP 400**（`code: "CELL_ID_CONFLICT"`，错误信息与 `conflicts` 列出重复 id 及
+     各自的 **1 基位置**），**整批拒绝、不写入、不推进版本、不留修订**；未给 `id`
+     的细胞仍由服务端生成 UUID（见功能 23）。
 4. **测量结果**：
    - 净面积 =（外轮廓面积 − 全部孔洞面积）× (μm/px)²，单位 **μm²**；
    - 总周长 =（外轮廓周长 + 全部孔洞周长）× μm/px，单位 **μm**；
@@ -482,6 +486,77 @@
       `img[onerror]`/注入 `<script>`/内联事件属性、文本原文仍可见、输入框回填原文、
       比较 chip 的 `data-key` 与点击配对仍可用。
 
+23. **细胞轮廓批量保存的 id 唯一原子校验（本轮）**：`PUT /api/images/:id/contours`
+    曾只逐细胞校验几何——一批几何全部合法、但两个或多个细胞使用**同一 `id`** 时接口仍
+    返回成功并落盘。随后**报告比较**的细胞索引按 id 建 `Map`（后一个覆盖前一个）、
+    **编辑页按 id 选中/定位细胞**也只命中一个，同批细胞实际上只保留一个，且该歧义
+    随修订快照与发布报告长期存在。本轮在**不新增表结构、不改启动方式、不改变既有
+    HTTP 状态码契约**的前提下修复（与第 19 条视野 id 防护同一套规则与响应形状）：
+    - **保存前原子校验**：逐细胞几何校验（含三位小数写入坐标校验）全部通过后，再检查
+      本批**显式提供的非空字符串 `id`** 是否唯一；发现冲突 → **HTTP 400**
+      `{error, code:"CELL_ID_CONFLICT", conflicts:[{id, positions:[1 基位置…]}]}`，
+      错误信息逐一说明每个重复 id 出现的 1 基位置（按首次出现顺序），**整批不写入、
+      草稿版本不推进、不追加修订**；
+    - **缺失 id 规则不变**：请求未给 `id`（或不是非空字符串）的细胞仍由服务端生成
+      UUID，自动生成的 id 不与本批显式 id 冲突；合法批次的保存、测量重算、版本推进、
+      修订追加、`version` 过期 **409** 等契约全部保持；
+    - **几何优先**：批次同时存在非法几何与重复 id 时，几何校验失败同样 **400** 整批拒绝；
+      版本过期（**409**）先于一切内容校验，与既有顺序一致；
+    - **历史数据不静默改写**：修复前落盘的重复 id 草稿、历史修订与已发布报告原样保留；
+      遗留批次原样回存同样被整批拒绝（不能把重复 id“洗白”为新版本），改为唯一 id 后
+      按当前草稿版本保存即成功并追加一条正常 `contours` 修订；
+    - **自测**：`node test-cell-id-api.js`（已并入 `npm test`）覆盖重复/三重/多组 id
+      的整批拒绝与定位、缺失 id 自动生成、合法批次与重名批次行为不变、几何+id 混合
+      拒绝、遗留数据保留与修正路径、409 契约。
+
+    调用示例：
+
+    ```bash
+    # 两个细胞共用 id「c1」→ 400，整批拒绝（版本、修订与已保存内容均不变）
+    curl -s -X PUT http://localhost:8080/api/images/$IMG/contours \
+      -H 'Content-Type: application/json' \
+      -d '{"version":2,"cells":[
+        {"id":"c1","name":"甲","outer":[{"x":0,"y":0},{"x":10,"y":0},{"x":10,"y":10},{"x":0,"y":10}],"holes":[]},
+        {"id":"c2","name":"乙","outer":[{"x":20,"y":0},{"x":30,"y":0},{"x":30,"y":10},{"x":20,"y":10}],"holes":[]},
+        {"id":"c1","name":"丙","outer":[{"x":40,"y":0},{"x":50,"y":0},{"x":50,"y":10},{"x":40,"y":10}],"holes":[]}
+      ]}'
+    # -> { "error": "细胞 id 在本批中不唯一：id「c1」同时用于第 1、3 个细胞；…整批轮廓保存已被拒绝…",
+    #      "code": "CELL_ID_CONFLICT",
+    #      "conflicts": [ { "id": "c1", "positions": [1, 3] } ] }
+
+    # 缺失 id 仍自动生成 UUID：合法批次 200，自动/显式 id 两两不同
+    curl -s -X PUT http://localhost:8080/api/images/$IMG/contours \
+      -H 'Content-Type: application/json' \
+      -d '{"version":2,"cells":[
+        {"name":"自动id","outer":[{"x":0,"y":0},{"x":10,"y":0},{"x":10,"y":10},{"x":0,"y":10}],"holes":[]},
+        {"id":"keep","name":"显式id","outer":[{"x":20,"y":0},{"x":30,"y":0},{"x":30,"y":10},{"x":20,"y":10}],"holes":[]}
+      ]}' | jq '{version, ids: [.cells[].id]}'
+    ```
+
+    Node.js 示例（无第三方依赖）：
+
+    ```js
+    async function saveUniqueCells(imageId, cells) {
+      const img = await fetch(`${base}/api/images/${imageId}`).then((r) => r.json());
+      const res = await fetch(`${base}/api/images/${imageId}/contours`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: img.version, cells })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409) throw new Error(`版本过期，请用 v${body.currentVersion} 重试`);
+      if (res.status === 400 && body.code === 'CELL_ID_CONFLICT') {
+        // conflicts: [{id, positions:[1 基位置…]}]——为每组保留首个、其余换新 id
+        for (const c of body.conflicts) {
+          c.positions.slice(1).forEach((pos1) => { cells[pos1 - 1].id = crypto.randomUUID(); });
+        }
+        return saveUniqueCells(imageId, cells); // 用【最新版本】重试；成功即追加正常修订
+      }
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      return body;
+    }
+    ```
+
 ## 配置项
 
 本轮（批量 ZIP 导出流式化）**未引入新的环境变量、外部依赖或表结构变更**，
@@ -633,7 +708,7 @@ npm start
 │   ├── coverage-diff.js # 同切片两报告 · 单视野覆盖变化四类划分（平面排列，只读）
 │   ├── field-grid.js  # 报告单视野网格密度分析：外接矩形等分、格子∩净区域有效面积、质心归格（只读）
 │   ├── field-zones.js # 报告单视野最近质心责任区：Voronoi 半平面求交 × 视野净区域平面排列、面积/占比/实际分区（只读）
-│   ├── field-identity.js # 视野 id 身份歧义：保存前批次唯一性校验、重复 id 冲突定位、按 id/名称分析的拒绝判定（不改写历史数据）
+│   ├── field-identity.js # 视野/细胞 id 身份歧义：保存前批次唯一性校验、重复 id 冲突定位（视野另有按 id/名称分析的拒绝判定，不改写历史数据）
 │   ├── render.js      # sharp + SVG 渲染标注 PNG
 │   └── exporter.js    # CSV（测量/汇总/视野统计/比较）与 ZIP 导出（按选中顺序逐份生成、流式写入并释放）
 ├── public/            # 前端（原生 JS，无需构建）
@@ -1836,7 +1911,7 @@ await fieldZones(process.env.RID, 'fieldF');
 | `GET /api/images/:id` | 草稿详情（含 `cells`、`fields`、实时 `fieldStats`） |
 | `GET /api/images/:id/file` | 原始图片 |
 | `PUT /api/images/:id/calibration` | 定标/重定标（带 `version`，过期 409）；视野统计随新比例重算 |
-| `PUT /api/images/:id/contours` | 整批保存细胞轮廓（带 `version`；非法 400 整批不生效；过期 409；几何校验以三位小数取整后实际写入的坐标为准） |
+| `PUT /api/images/:id/contours` | 整批保存细胞轮廓（带 `version`；非法几何或本批 `id` 重复均 400 整批不生效，重复 id 返回 `code:"CELL_ID_CONFLICT"` 及 1 基位置；过期 409；几何校验以三位小数取整后实际写入的坐标为准；缺 `id` 自动补 UUID） |
 | **`PUT /api/images/:id/fields`** | **整批保存取样视野（带 `version`；非法 400 整批不生效；过期 409；几何校验以三位小数取整后实际写入的坐标为准）** |
 | **`POST /api/images/:id/field-merge`** | **多视野合并统计（只读，按草稿当前数据实时计算；不足两个/重复/不存在 400）** |
 | **`POST /api/images/:id/field-coverage`** | **单视野细胞覆盖核对（只读，几何交集；按草稿当前轮廓/视野/标尺实时计算；视野标识为空/不存在 400，未定标仍给像素面积与覆盖率）** |
